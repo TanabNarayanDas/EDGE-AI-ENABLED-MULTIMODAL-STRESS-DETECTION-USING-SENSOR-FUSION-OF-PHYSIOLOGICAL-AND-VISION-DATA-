@@ -1,0 +1,113 @@
+!pip install imbalanced-learn
+
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, Model, callbacks, regularizers
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix
+from imblearn.over_sampling import SMOTE
+import pickle
+from google.colab import files
+
+print("--- PPD-1: V5 RESNET SUPER-VECTOR TRAINING ---")
+
+print("Please upload 'master_vision_dataset_v5_super.csv'.")
+uploaded = files.upload()
+
+file_name = "master_vision_dataset_v5_super.csv"
+if file_name not in uploaded:
+    print(f"Error: {file_name} not found.")
+else:
+    print("\nLoading Master V5 Dataset (59 Features)...")
+    df = pd.read_csv(file_name)
+
+    X = df.iloc[:, :-1].values
+    y = df.iloc[:, -1].values
+
+    # 1. SCALING
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    with open('vision_scaler_v5.pkl', 'wb') as f:
+        pickle.dump(scaler, f)
+
+    # 2. SPLIT & SMOTE (Synthetic Data Balancing)
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.15, random_state=42)
+
+    print("\nApplying SMOTE to balance decision boundaries perfectly...")
+    smote = SMOTE(random_state=42)
+    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+
+    # 3. BUILD RESIDUAL NETWORK (Functional API)
+    inputs = layers.Input(shape=(59,))
+
+    # Block 1
+    x = layers.Dense(256, kernel_regularizer=regularizers.l2(1e-4))(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    x = layers.Dropout(0.3)(x)
+
+    # Block 2
+    y_layer = layers.Dense(128, kernel_regularizer=regularizers.l2(1e-4))(x)
+    y_layer = layers.BatchNormalization()(y_layer)
+    y_layer = layers.Activation('relu')(y_layer)
+    y_layer = layers.Dropout(0.3)(y_layer)
+
+    # Block 3 with Skip Connection
+    z = layers.Dense(128, kernel_regularizer=regularizers.l2(1e-4))(y_layer)
+    z = layers.BatchNormalization()(z)
+
+    # Add skip connection (Residual)
+    added = layers.Add()([y_layer, z])
+    added = layers.Activation('relu')(added)
+    added = layers.Dropout(0.2)(added)
+
+    # Final Layers
+    out = layers.Dense(64, activation='relu')(added)
+    outputs = layers.Dense(1, activation='sigmoid')(out)
+
+    model = Model(inputs=inputs, outputs=outputs)
+
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'])
+
+    # 4. CALLBACKS
+    early_stop = callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+    lr_scheduler = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1)
+
+    # 5. TRAIN
+    print("\nStarting ResNet Training...")
+    history = model.fit(X_train_res, y_train_res,
+                        epochs=150,
+                        batch_size=64,
+                        validation_split=0.1,
+                        callbacks=[early_stop, lr_scheduler],
+                        verbose=1)
+
+    # 6. EVALUATION
+    print("\n" + "="*40)
+    print("   V5 CLINICAL ACCURACY REPORT")
+    print("="*40)
+
+    y_pred_probs = model.predict(X_test)
+    y_pred = (y_pred_probs > 0.5).astype(int).flatten()
+
+    print("\nConfusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, target_names=["Relaxed", "Stressed/Fatigued"]))
+
+    # 7. EXPORT
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    tflite_model = converter.convert()
+
+    with open('vision_model_v5.tflite', 'wb') as f:
+        f.write(tflite_model)
+
+    print("\nSUCCESS! V5 AI files generated. Downloading now...")
+    files.download('vision_model_v5.tflite')
+    files.download('vision_scaler_v5.pkl')
